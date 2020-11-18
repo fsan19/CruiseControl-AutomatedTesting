@@ -1,0 +1,270 @@
+module cruise:
+    % Pure Signal Inputs
+    input On,Off, Resume, Set, QuickAccel, QuickDecel;
+    % Valued Signal Inputs
+    input Accel : float;
+    input Brake : float;
+    input Speed : float;
+    % Valued Signal Outputs
+    output CruiseSpeed : float;
+    output ThrottleCmd : float;
+    output CruiseState : integer;
+
+
+    % Next State Module
+    run NextState   [
+                    % Map Inputs              
+                    signal On/ l_On;
+                    signal Off/l_Off;
+                    signal Resume/l_Resume;
+                    signal Accel/l_Accel;
+                    signal Brake/l_Brake;
+                    signal Speed/l_Speed;
+                    % Map Outputs
+                    signal CruiseState/l_CruiseState
+
+                    ];
+
+                    
+    ||
+    
+   
+    % Car Driving Control Module
+    run DriverControl   [
+                        % Map Inputs
+                        signal CruiseState/l_CruiseState;
+                        signal CruiseSpeed/l_CruiseSpeed;
+                        signal Accel/l_Accel;
+                        signal Speed/l_Speed;
+                        % Map Outputs
+                        signal ThrottleCmd/l_ThrottleCmd
+                        ];
+    ||
+
+   
+    % Cruise Speed Management Module
+    run CruiseSpeedManager  [
+                            % Map Inputs
+                            signal CruiseState/l_CruiseState;
+                            signal QuickAccel/l_QuickAccel;
+                            signal QuickDecel/l_QuickDecel;
+                            signal Speed/l_Speed;
+                            signal Set/l_Set;
+                            % Map Outputs
+                            signal CruiseSpeed/l_CruiseSpeed
+                            ];
+
+end module
+
+module DriverControl:
+
+
+    % Valued Signal Inputs
+    input l_Accel : float;
+    input l_CruiseSpeed : float;
+    input l_CruiseState : integer;
+    input l_Speed : float;
+    % Valued Signal Outputs
+    output l_ThrottleCmd : float;
+    
+    % State defines in header
+    constant OFF : integer;
+    constant ON : integer;
+    constant DISABLE : integer;
+    constant STANDBY : integer;
+
+    function regulateThrottle(integer, float, float) : float;
+    
+    var enRegulate := false : boolean in
+    var enThrottle := false : boolean in
+    var isGoingOn := 0 : integer in
+    var throttleVal := 0.0f : float in
+
+    emit l_ThrottleCmd(throttleVal);
+    
+    loop
+        
+        await l_CruiseState;
+
+        enRegulate := ((?l_CruiseState) = ON);
+       
+        % If CRUISE MODE EN we need to regulate, any other state use accel pedal
+        if enRegulate then
+            
+            enThrottle :=  ( (?l_CruiseState=ON) and pre(?l_CruiseState)= OFF);
+
+            if(enThrottle) then
+                isGoingOn := 1;
+            else 
+                isGoingOn := 0;
+            end if; 
+            
+            throttleVal := regulateThrottle(isGoingOn,?l_CruiseSpeed,?l_Speed);    
+        else    
+            throttleVal := ?l_Accel;
+        end if;    
+
+        emit l_ThrottleCmd(throttleVal);
+            
+    end loop;
+    end var;
+    end var;
+    end var;
+    end var;
+
+
+end module
+
+module NextState:
+    % Pure Signal Inputs
+    input l_On, l_Off,l_Resume;
+    % Valued Signal Inputs
+    % Assume Accel & Brake Never Happen Together
+    input l_Accel : float;
+    input l_Brake : float;
+    input l_Speed : float;
+    % Valued Signal Outputs
+    output l_CruiseState : integer;
+    % Constants from header
+    constant SPEED_MIN  : float;
+    constant SPEED_MAX  : float;
+    constant PEDALS_MIN : float;
+    % States
+    constant OFF : integer;
+    constant ON : integer;
+    constant DISABLE : integer;
+    constant STANDBY : integer;
+
+    % initliased false doesnt matter as will reallocate each time    
+    var isLegalSpeed   := false : boolean in
+    var isAccelPressed := false: boolean in 
+    
+    % initial state always has Cruise Mode off    
+    var state := OFF : integer in
+
+    emit l_CruiseState(state);
+    loop
+        signal isBrakePressed in 
+        pause;
+       
+        % Manual : OFF 
+        if state = OFF then
+            abort
+                % % Will abort without  executing body
+                nothing;
+                when immediate l_On do state := ON
+            end abort;             
+
+        % Cruise Control : ON, DISABLE, STDBY
+        else
+            abort 
+            
+                % Check speed
+                isLegalSpeed := (?l_Speed) >= SPEED_MIN and (?l_Speed) <= SPEED_MAX;
+                % Check Accelerator
+                isAccelPressed := (?l_Accel) >  PEDALS_MIN;  
+                % Check Brake for strong abort
+                if (?l_Brake) > PEDALS_MIN then
+                    emit isBrakePressed; 
+                end if;
+                
+                abort
+                    if state = ON then
+                       
+                        if ( (isAccelPressed) or (not isLegalSpeed) ) then
+                            state := DISABLE;
+                        end if;
+                        
+                    elsif state = DISABLE then
+                    
+                        if ( (not isAccelPressed) and isLegalSpeed ) then
+                            state := ON;
+                        end if;
+
+                    elsif state = STANDBY then
+                        present(l_Resume) then
+
+                            if (not isAccelPressed) and isLegalSpeed  then
+                                state := ON;
+                            else
+                                state := DISABLE;
+                            end if;
+                            
+                        end present;
+                        
+                    end if;
+                            
+                when immediate isBrakePressed do state := STANDBY
+                end abort
+            
+            when immediate l_Off do state := OFF
+            end abort
+
+        end if;
+        emit l_CruiseState(state);
+        end signal
+    end loop;
+    end var;
+    end var;
+    end var; 
+end module
+
+module CruiseSpeedManager:
+    % Pure Signal Inputs
+    input l_Set, l_QuickAccel, l_QuickDecel;
+    % Valued Signal Inputs
+    input l_CruiseState : integer;
+    input l_Speed : float;
+    % Valued Signal Output
+    output l_CruiseSpeed: float;
+
+    % State defines in header
+    constant OFF : integer;
+    constant ON : integer;
+    constant DISABLE : integer;
+    constant STANDBY : integer;
+    constant SPEED_INC : float;
+    constant SPEED_MIN : float;
+    constant SPEED_MAX :float;
+
+    var enManage := false : boolean in
+    var newCruiseSpeed := 0.0f : float in 
+
+    emit l_CruiseSpeed(newCruiseSpeed);
+
+    loop
+        await l_CruiseState;
+
+        enManage := not ((?l_CruiseState) = OFF);
+
+        if enManage then
+
+            if (pre(?l_CruiseState) = OFF) then
+                newCruiseSpeed := ?l_Speed; 
+            end if;    
+
+            present(l_Set) then
+                newCruiseSpeed := ?l_Speed;
+            else
+                present (l_QuickDecel) then
+                    newCruiseSpeed := newCruiseSpeed - SPEED_INC;
+                end present;
+
+                present (l_QuickAccel) then
+                    newCruiseSpeed := newCruiseSpeed + SPEED_INC;
+                end present;
+            end present;
+            
+            if newCruiseSpeed < SPEED_MIN then
+                newCruiseSpeed := SPEED_MIN;
+            elsif newCruiseSpeed > SPEED_MAX then
+                newCruiseSpeed := SPEED_MAX;
+            end if;
+        end if;    
+        % Always emit a Cruise Speed for every State Transition
+        emit l_CruiseSpeed(newCruiseSpeed);
+
+    end loop;
+    end var;
+    end var;
+end module
